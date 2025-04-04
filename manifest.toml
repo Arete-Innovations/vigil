@@ -1,0 +1,50 @@
+[spark]
+name = "vigil"
+version = "0.1.0"
+description = "Hot reloading system for templates, stylesheets, and JavaScript files"
+author = "Zmole Cristian"
+license = "AGPL-3.0"
+min_framework_version = "0.1.0"
+repository = "https://github.com/Arete-Innovations/vigil"
+
+[dependencies]
+toml = "0.8.20"
+
+# Vigil supports a cascading configuration system with the following priority:
+# 1. Catalyst.toml [spark.vigil] section (highest priority)
+# 2. Environment variables (VIGIL_TEMPLATE_HOT_RELOAD, VIGIL_REFRESH_INTERVAL, etc.)
+# 3. This manifest.toml [development] section
+# 4. Default hardcoded values (lowest priority)
+
+[config]
+required_env = []
+
+optional_env = [
+  "VIGIL_TEMPLATE_HOT_RELOAD",  # Enable/disable template hot reload (true/false)
+  "VIGIL_REFRESH_INTERVAL",     # Milliseconds between checking for file changes
+  "VIGIL_COOLDOWN_PERIOD",      # Milliseconds to wait after reload before checking again
+  "VIGIL_DISABLE",              # Set to true to disable Vigil in development mode
+  "VIGIL_LOG_LEVEL"             # Log level for Vigil (defaults to info)
+]
+
+# Configuration defaults that can be overridden in Catalyst.toml
+# Add these settings to your Catalyst.toml file like this:
+# [spark.vigil]
+# refresh_interval = 50  # Make it even more responsive
+# cooldown_period = 500  # Prevent too many reloads
+[config.defaults]
+enabled = true
+log_level = "info"
+
+# Enable auto-reload of templates, stylesheets, and JavaScript files
+template_hot_reload = true
+
+# Refresh interval in milliseconds for checking template changes
+# Lower value = more responsive but higher CPU usage
+# Higher value = less responsive but lower CPU usage
+refresh_interval = 400
+
+# Cooldown period in milliseconds after reload to prevent reload storms
+# This prevents multiple reloads happening too quickly
+cooldown_period = 100
+
