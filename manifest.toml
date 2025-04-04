@@ -9,6 +9,9 @@ repository = "https://github.com/Arete-Innovations/vigil"
 
 [dependencies]
 toml = "0.8.20"
+rocket_ws = "0.1.1"
+notify = "5.0.0"
+rand = "0.8.5"
 
 # Vigil supports a cascading configuration system with the following priority:
 # 1. Catalyst.toml [spark.vigil] section (highest priority)
