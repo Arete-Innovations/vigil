@@ -1,4 +1,5 @@
 use crate::cata_log;
+use crate::services::makeuse;
 use crate::services::sparks::registry::Spark;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{ContentType, Header};
@@ -520,6 +521,15 @@ impl Fairing for ScriptInjectionFairing {
 impl Spark for VigilSpark {
     fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         cata_log!(Info, format!("Vigil spark initialized in {} environment", self.environment));
+        
+        // Register template components if in development mode
+        if self.environment == "dev" && self.config.template_hot_reload {
+            // Register hot reload script via the makeuse API
+            makeuse::register_head_script("vigil", r#"<script src="/vigil/inject.js"></script>"#.to_string(), true);
+            
+            cata_log!(Debug, "Registered Vigil hot reload script in template components");
+        }
+        
         Ok(())
     }
 
