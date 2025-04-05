@@ -51,6 +51,10 @@
             isReconnecting = false;
         });
         
+        // Track last ping time for connection health monitoring
+        let lastPingTime = Date.now();
+        let connectionId = null;
+        
         // Listen for messages from the server
         ws.addEventListener('message', (event) => {
             const message = event.data;
@@ -86,17 +90,35 @@
                 } else {
                     console.log('[Vigil] Skipping duplicate reload - too soon after previous reload');
                 }
-            } else if (message === 'connected') {
-                console.log('[Vigil] Connection confirmed by server');
-            } else if (message === 'ping') {
-                // Just a ping to keep connection alive, no need to do anything
+            } else if (message.startsWith('connected:')) {
+                // Extract connection ID for improved logging
+                connectionId = message.substring(10);
+                console.log(`[Vigil] Connection confirmed by server [id=${connectionId}]`);
+            } else if (message.startsWith('ping:')) {
+                // Update last ping time for connection health monitoring
+                lastPingTime = Date.now();
+                // We don't need to respond to pings as the server is using them just to keep the connection alive
             }
         });
         
+        // Add connection health check timer
+        const healthCheckInterval = setInterval(() => {
+            const now = Date.now();
+            // If we haven't received a ping in 30 seconds, consider the connection dead
+            if (now - lastPingTime > 30000) {
+                console.warn(`[Vigil] No ping received in over 30 seconds, connection may be dead [id=${connectionId}]`);
+                clearInterval(healthCheckInterval);
+                ws.close();
+            }
+        }, 5000); // Check every 5 seconds
+        
         // Connection closed
         ws.addEventListener('close', (event) => {
+            // Clear health check interval
+            clearInterval(healthCheckInterval);
+            
             if (!isReconnecting) {
-                console.log('[Vigil] Disconnected from template reload websocket, attempting to reconnect...');
+                console.log(`[Vigil] Disconnected from template reload websocket [id=${connectionId}], attempting to reconnect...`);
                 attemptReconnect();
             }
         });

@@ -330,28 +330,49 @@ impl VigilSpark {
 fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
     // Set the initial timestamp to now instead of 0 to avoid fake changes
     let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-
     LAST_MOD_TIME.store(current_time, Ordering::SeqCst);
+    
+    // Track connection status
+    let connection_id = rand::random::<u32>();
+    cata_log!(Info, format!("WebSocket connection established [id={}]", connection_id));
 
     rocket_ws::Stream! { ws =>
         // Send initial connection message but don't force reload
-        yield Message::text("connected");
-
+        yield Message::text(format!("connected:{}", connection_id));
+        
         // Keep track of errors
         let mut consecutive_errors = 0;
         let max_errors = 5;
-
+        
+        // Track when we last sent a ping
+        let mut last_ping_time = std::time::Instant::now();
+        
         // Add a delay before starting checks to avoid initial duplicates
         rocket::tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
+        
         loop {
-            // Add a try-catch for additional robustness
-            let result = rocket::tokio::task::spawn_blocking(move || {
-                VigilSpark::check_template_changes()
-            }).await;
+            // Regularly send pings to keep the connection alive
+            let now = std::time::Instant::now();
+            if now.duration_since(last_ping_time).as_secs() >= 10 {  // Send ping every 10 seconds
+                cata_log!(Debug, format!("Sending ping to client [id={}]", connection_id));
+                yield Message::text(format!("ping:{}", connection_id));
+                last_ping_time = now;
+            }
 
+            // Perform the file check in a blocking task to avoid blocking the async runtime
+            let check_result = rocket::tokio::task::spawn_blocking(move || {
+                VigilSpark::check_template_changes()
+            });
+            
+            // Add a timeout to the check to prevent blocking indefinitely
+            let result = rocket::tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                check_result
+            ).await;
+            
             match result {
-                Ok(Some(changed_file)) => {
+                // Successful check with a file change detected
+                Ok(Ok(Some(changed_file))) => {
                     // Determine file type for more informative logging
                     let file_type = if changed_file.ends_with(".tera") || changed_file.ends_with(".html") {
                         "Template"
@@ -363,7 +384,8 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
                         "File"
                     };
 
-                    cata_log!(Info, format!("{} changed: {}, sending reload signal", file_type, changed_file));
+                    cata_log!(Info, format!("[id={}] {} changed: {}, sending reload signal", 
+                            connection_id, file_type, changed_file));
                     yield Message::text(format!("reload:{}", changed_file));
 
                     // Add a delay after sending a reload to prevent duplicate reloads
@@ -372,27 +394,32 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
                         .unwrap_or(3000);
 
                     rocket::tokio::time::sleep(std::time::Duration::from_millis(cooldown)).await;
-
                     consecutive_errors = 0;
                 },
-                Ok(None) => {
-                    // No changes, just continue
+                // Successful check with no changes
+                Ok(Ok(None)) => {
+                    // Just continue, nothing to do
+                    consecutive_errors = 0;
                 },
-                Err(e) => {
-                    // Error during check, log it
-                    cata_log!(Error, format!("Error checking for template changes: {:?}", e));
+                // Task join error
+                Ok(Err(e)) => {
+                    cata_log!(Error, format!("[id={}] Task error checking for template changes: {:?}", 
+                            connection_id, e));
                     consecutive_errors += 1;
-
-                    if consecutive_errors >= max_errors {
-                        cata_log!(Error, "Too many consecutive errors, breaking WebSocket connection");
-                        break;
-                    }
+                },
+                // Timeout error
+                Err(_) => {
+                    cata_log!(Warning, format!("[id={}] Timeout while checking for template changes", 
+                            connection_id));
+                    consecutive_errors += 1;
                 }
             }
 
-            // Send a ping occasionally to keep the connection alive
-            if consecutive_errors == 0 && rand::random::<u8>() < 10 {  // ~4% chance
-                yield Message::text("ping");
+            // Break the connection if we have too many errors
+            if consecutive_errors >= max_errors {
+                cata_log!(Error, format!("[id={}] Too many consecutive errors, closing WebSocket connection", 
+                        connection_id));
+                break;
             }
 
             // Sleep based on configured refresh interval before checking again
@@ -402,6 +429,8 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
 
             rocket::tokio::time::sleep(std::time::Duration::from_millis(refresh_interval)).await;
         }
+        
+        cata_log!(Info, format!("WebSocket connection closed [id={}]", connection_id));
     }
 }
 
