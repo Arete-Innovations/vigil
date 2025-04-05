@@ -49,5 +49,5 @@ refresh_interval = 400
 
 # Cooldown period in milliseconds after reload to prevent reload storms
 # This prevents multiple reloads happening too quickly
-cooldown_period = 100
+cooldown_period = 1500
 

@@ -7,16 +7,14 @@ use rocket::request::Request;
 use rocket::response::content::RawJavaScript;
 use rocket::response::Response;
 use rocket::{get, routes, Build, Rocket};
-use rocket_dyn_templates::Template;
 use rocket_ws::Message;
 use rocket_ws::WebSocket;
-use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use std::time::{Instant, SystemTime};
 
 // JS script for client-side hot reloading
 const DEV_RELOAD_JS: &str = include_str!("dev-reload.js");
@@ -331,48 +329,46 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
     // Set the initial timestamp to now instead of 0 to avoid fake changes
     let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     LAST_MOD_TIME.store(current_time, Ordering::SeqCst);
-    
-    // Track connection status
+
+    // Generate a unique connection ID
     let connection_id = rand::random::<u32>();
     cata_log!(Info, format!("WebSocket connection established [id={}]", connection_id));
 
+    // Create a stream of messages for the client
     rocket_ws::Stream! { ws =>
-        // Send initial connection message but don't force reload
+        // Send initial connection message
         yield Message::text(format!("connected:{}", connection_id));
-        
-        // Keep track of errors
-        let mut consecutive_errors = 0;
-        let max_errors = 5;
-        
-        // Track when we last sent a ping
-        let mut last_ping_time = std::time::Instant::now();
-        
-        // Add a delay before starting checks to avoid initial duplicates
-        rocket::tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        
-        loop {
-            // Regularly send pings to keep the connection alive
-            let now = std::time::Instant::now();
-            if now.duration_since(last_ping_time).as_secs() >= 10 {  // Send ping every 10 seconds
-                cata_log!(Debug, format!("Sending ping to client [id={}]", connection_id));
-                yield Message::text(format!("ping:{}", connection_id));
-                last_ping_time = now;
-            }
 
-            // Perform the file check in a blocking task to avoid blocking the async runtime
-            let check_result = rocket::tokio::task::spawn_blocking(move || {
-                VigilSpark::check_template_changes()
-            });
-            
-            // Add a timeout to the check to prevent blocking indefinitely
-            let result = rocket::tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                check_result
-            ).await;
-            
-            match result {
-                // Successful check with a file change detected
-                Ok(Ok(Some(changed_file))) => {
+        // Add a short delay before starting to avoid initial duplicates
+        rocket::tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Define last check time to throttle file checks (every 2 seconds)
+        let mut last_check_time = Instant::now();
+        let check_interval = std::time::Duration::from_secs(2);
+
+        // Send initial timestamp
+        let current_timestamp = LAST_MOD_TIME.load(Ordering::SeqCst);
+        yield Message::text(format!("time:{}", current_timestamp));
+
+        // Main message processing loop
+        loop {
+            // Check for file changes (but not too frequently)
+            let now = Instant::now();
+            if now.duration_since(last_check_time) >= check_interval {
+                last_check_time = now;
+
+                // Perform file check in a background task
+                let check_result = rocket::tokio::task::spawn_blocking(move || {
+                    VigilSpark::check_template_changes()
+                });
+
+                let result = rocket::tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    check_result
+                ).await;
+
+                // If we detected a file change, send a reload command
+                if let Ok(Ok(Some(changed_file))) = result {
                     // Determine file type for more informative logging
                     let file_type = if changed_file.ends_with(".tera") || changed_file.ends_with(".html") {
                         "Template"
@@ -384,53 +380,21 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
                         "File"
                     };
 
-                    cata_log!(Info, format!("[id={}] {} changed: {}, sending reload signal", 
-                            connection_id, file_type, changed_file));
+                    cata_log!(Info, format!("[id={}] {} changed: {}, sending reload signal",
+                        connection_id, file_type, changed_file));
+
+                    // Send reload command
                     yield Message::text(format!("reload:{}", changed_file));
-
-                    // Add a delay after sending a reload to prevent duplicate reloads
-                    let cooldown = VIGIL_INSTANCE.get()
-                        .map(|instance| instance.config.cooldown_period as u64)
-                        .unwrap_or(3000);
-
-                    rocket::tokio::time::sleep(std::time::Duration::from_millis(cooldown)).await;
-                    consecutive_errors = 0;
-                },
-                // Successful check with no changes
-                Ok(Ok(None)) => {
-                    // Just continue, nothing to do
-                    consecutive_errors = 0;
-                },
-                // Task join error
-                Ok(Err(e)) => {
-                    cata_log!(Error, format!("[id={}] Task error checking for template changes: {:?}", 
-                            connection_id, e));
-                    consecutive_errors += 1;
-                },
-                // Timeout error
-                Err(_) => {
-                    cata_log!(Warning, format!("[id={}] Timeout while checking for template changes", 
-                            connection_id));
-                    consecutive_errors += 1;
                 }
             }
 
-            // Break the connection if we have too many errors
-            if consecutive_errors >= max_errors {
-                cata_log!(Error, format!("[id={}] Too many consecutive errors, closing WebSocket connection", 
-                        connection_id));
-                break;
-            }
-
-            // Sleep based on configured refresh interval before checking again
-            let refresh_interval = VIGIL_INSTANCE.get()
-                .map(|instance| instance.config.refresh_interval as u64)
-                .unwrap_or(1000);
-
-            rocket::tokio::time::sleep(std::time::Duration::from_millis(refresh_interval)).await;
+            // Send current timestamp to client
+            let current_timestamp = LAST_MOD_TIME.load(Ordering::SeqCst);
+            yield Message::text(format!("time:{}", current_timestamp));
+            
+            // Small sleep to prevent CPU spinning
+            rocket::tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        
-        cata_log!(Info, format!("WebSocket connection closed [id={}]", connection_id));
     }
 }
 
@@ -458,7 +422,7 @@ fn serve_inject_script() -> RawJavaScript<String> {
                 // Check if Vigil is active from the headers
                 const isActive = response.headers.get('X-Vigil-Active') === 'true';
                 const scriptPath = response.headers.get('X-Vigil-Script-Path');
-                
+
                 if (isActive && scriptPath) {
                     console.log('[Vigil] Detected via header, loading from ' + scriptPath);
                     const script = document.createElement('script');
@@ -550,15 +514,15 @@ impl Fairing for ScriptInjectionFairing {
 impl Spark for VigilSpark {
     fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         cata_log!(Info, format!("Vigil spark initialized in {} environment", self.environment));
-        
+
         // Register template components if in development mode
         if self.environment == "dev" && self.config.template_hot_reload {
             // Register hot reload script via the makeuse API
             makeuse::register_head_script("vigil", r#"<script src="/vigil/inject.js"></script>"#.to_string(), true);
-            
+
             cata_log!(Debug, "Registered Vigil hot reload script in template components");
         }
-        
+
         Ok(())
     }
 
@@ -580,7 +544,7 @@ impl Spark for VigilSpark {
     fn name(&self) -> &str {
         "vigil"
     }
-    
+
     fn description(&self) -> &str {
         "Live template hot-reloading system"
     }
