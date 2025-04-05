@@ -362,7 +362,7 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
                         "File"
                     };
 
-                    println!("{} changed: {}, sending reload signal", file_type, changed_file);
+                    cata_log!(Info, format!("{} changed: {}, sending reload signal", file_type, changed_file));
                     yield Message::text(format!("reload:{}", changed_file));
 
                     // Add a delay after sending a reload to prevent duplicate reloads
@@ -379,11 +379,11 @@ fn template_reload_websocket(ws: WebSocket) -> rocket_ws::Stream!['static] {
                 },
                 Err(e) => {
                     // Error during check, log it
-                    println!("Error checking for template changes: {:?}", e);
+                    cata_log!(Error, format!("Error checking for template changes: {:?}", e));
                     consecutive_errors += 1;
 
                     if consecutive_errors >= max_errors {
-                        println!("Too many consecutive errors, breaking connection");
+                        cata_log!(Error, "Too many consecutive errors, breaking WebSocket connection");
                         break;
                     }
                 }
@@ -540,6 +540,10 @@ impl Spark for VigilSpark {
 
     fn name(&self) -> &str {
         "vigil"
+    }
+    
+    fn description(&self) -> &str {
+        "Live template hot-reloading system"
     }
 }
 
